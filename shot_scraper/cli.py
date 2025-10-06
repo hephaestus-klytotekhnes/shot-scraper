@@ -89,6 +89,8 @@ def javascript_file_option(fn):
         "--javascript-file",
         type=click.Path(exists=True, file_okay=True, dir_okay=False, readable=True),
         help="Path to JavaScript file to execute",
+    )(fn)
+    return fn
 
 def remote_cdp_option(fn):
     click.option(
