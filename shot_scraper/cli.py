@@ -82,7 +82,6 @@ def http_auth_options(fn):
     click.option("--auth-password", help="Password for HTTP Basic authentication")(fn)
     return fn
 
-
 def javascript_file_option(fn):
     """Decorator to add --javascript-file option"""
     click.option(
@@ -90,9 +89,14 @@ def javascript_file_option(fn):
         "--javascript-file",
         type=click.Path(exists=True, file_okay=True, dir_okay=False, readable=True),
         help="Path to JavaScript file to execute",
+
+def remote_cdp_option(fn):
+    click.option(
+        "--remote-cdp",
+        envvar="SHOT_SCRAPER_REMOTE_CDP_URL",
+        help="Connect to remote browser via CDP (forces Chromium)",
     )(fn)
     return fn
-
 
 def skip_or_fail(response, skip, fail):
     if skip and fail:
@@ -268,6 +272,7 @@ def cli():
 @bypass_csp_option
 @silent_option
 @http_auth_options
+@remote_cdp_option
 def shot(
     url,
     auth,
@@ -302,6 +307,7 @@ def shot(
     silent,
     auth_username,
     auth_password,
+    remote_cdp,
 ):
     """
     Take a single screenshot of a page or portion of a page.
@@ -372,6 +378,7 @@ def shot(
             bypass_csp=bypass_csp,
             auth_username=auth_username,
             auth_password=auth_password,
+            remote_cdp=remote_cdp,
         )
         if interactive or devtools:
             use_existing_page = True
@@ -428,11 +435,17 @@ def _browser_context(
     auth_username=None,
     auth_password=None,
     record_har_path=None,
+    remote_cdp=None,
 ):
     browser_kwargs = dict(
         headless=not interactive, devtools=devtools, args=browser_args
     )
-    if browser == "chromium":
+
+    if remote_cdp:
+        # When using remote CDP, we must use Chromium and connect instead of launch
+        click.echo("Using remote browser, IGNORING BROWSER ARGS", err=True)
+        browser_obj = p.chromium.connect_over_cdp(remote_cdp)
+    elif browser == "chromium":
         browser_obj = p.chromium.launch(**browser_kwargs)
     elif browser == "firefox":
         browser_obj = p.firefox.launch(**browser_kwargs)
@@ -527,6 +540,7 @@ def _browser_context(
     type=click.Path(file_okay=True, writable=True, dir_okay=False),
     help="Path to HAR file to save all requests",
 )
+@remote_cdp_option
 def multi(
     config,
     auth,
@@ -550,6 +564,7 @@ def multi(
     har,
     har_zip,
     har_file,
+    remote_cdp,
 ):
     """
     Take multiple screenshots, defined by a YAML file
@@ -600,6 +615,7 @@ def multi(
             auth_username=auth_username,
             auth_password=auth_password,
             record_har_path=har_file or None,
+            remote_cdp=remote_cdp,
         )
         try:
             for shot in shots:
@@ -693,6 +709,7 @@ def multi(
 @skip_fail_options
 @bypass_csp_option
 @http_auth_options
+@remote_cdp_option
 def accessibility(
     url,
     auth,
@@ -706,6 +723,7 @@ def accessibility(
     bypass_csp,
     auth_username,
     auth_password,
+    remote_cdp,
 ):
     """
     Dump the Chromium accessibility tree for the specifed page
@@ -723,6 +741,7 @@ def accessibility(
             bypass_csp=bypass_csp,
             auth_username=auth_username,
             auth_password=auth_password,
+            remote_cdp=remote_cdp,
         )
         page = context.new_page()
         if log_console:
@@ -770,6 +789,7 @@ def accessibility(
 @skip_fail_options
 @bypass_csp_option
 @http_auth_options
+@remote_cdp_option
 def har(
     url,
     zip_,
@@ -786,6 +806,7 @@ def har(
     bypass_csp,
     auth_username,
     auth_password,
+    remote_cdp,
 ):
     """
     Record a HAR file for the specified page
@@ -815,6 +836,7 @@ def har(
             auth_username=auth_username,
             auth_password=auth_password,
             record_har_path=str(output),
+            remote_cdp=remote_cdp,
         )
         page = context.new_page()
         if log_console:
@@ -876,6 +898,7 @@ def har(
 @skip_fail_options
 @bypass_csp_option
 @http_auth_options
+@remote_cdp_option
 def javascript(
     url,
     javascript,
@@ -893,6 +916,7 @@ def javascript(
     bypass_csp,
     auth_username,
     auth_password,
+    remote_cdp,
 ):
     """
     Execute JavaScript against the page and return the result as JSON
@@ -946,6 +970,7 @@ def javascript(
             bypass_csp=bypass_csp,
             auth_username=auth_username,
             auth_password=auth_password,
+            remote_cdp=remote_cdp,
         )
         page = context.new_page()
         if log_console:
@@ -1023,6 +1048,7 @@ def javascript(
 @bypass_csp_option
 @silent_option
 @http_auth_options
+@remote_cdp_option
 def pdf(
     url,
     auth,
@@ -1046,6 +1072,7 @@ def pdf(
     silent,
     auth_username,
     auth_password,
+    remote_cdp,
 ):
     """
     Create a PDF of the specified page
@@ -1073,6 +1100,7 @@ def pdf(
             auth_username=auth_username,
             auth_password=auth_password,
             timeout=timeout,
+            remote_cdp=remote_cdp,
         )
         page = context.new_page()
         if log_console:
@@ -1145,6 +1173,7 @@ def pdf(
 @bypass_csp_option
 @silent_option
 @http_auth_options
+@remote_cdp_option
 def html(
     url,
     auth,
@@ -1163,6 +1192,7 @@ def html(
     silent,
     auth_username,
     auth_password,
+    remote_cdp,
 ):
     """
     Output the final HTML of the specified page
@@ -1188,6 +1218,7 @@ def html(
             bypass_csp=bypass_csp,
             auth_username=auth_username,
             auth_password=auth_password,
+            remote_cdp=remote_cdp,
         )
         page = context.new_page()
         if log_console:
@@ -1255,7 +1286,8 @@ def install(browser):
 @user_agent_option
 @click.option("--devtools", is_flag=True, help="Open browser DevTools")
 @log_console_option
-def auth(url, context_file, browser, browser_args, user_agent, devtools, log_console):
+@remote_cdp_option
+def auth(url, context_file, browser, browser_args, user_agent, devtools, log_console, remote_cdp):
     """
     Open a browser so user can manually authenticate with the specified site,
     then save the resulting authentication context to a file.
@@ -1273,6 +1305,7 @@ def auth(url, context_file, browser, browser_args, user_agent, devtools, log_con
             browser=browser,
             browser_args=browser_args,
             user_agent=user_agent,
+            remote_cdp=remote_cdp,
         )
         context = browser_obj.new_context()
         page = context.new_page()
