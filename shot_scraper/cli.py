@@ -83,6 +83,17 @@ def http_auth_options(fn):
     return fn
 
 
+def javascript_file_option(fn):
+    """Decorator to add --javascript-file option"""
+    click.option(
+        "-jf",
+        "--javascript-file",
+        type=click.Path(exists=True, file_okay=True, dir_okay=False, readable=True),
+        help="Path to JavaScript file to execute",
+    )(fn)
+    return fn
+
+
 def skip_or_fail(response, skip, fail):
     if skip and fail:
         raise click.ClickException("--skip and --fail cannot be used together")
@@ -131,6 +142,17 @@ def reduced_motion_option(fn):
         help="Emulate 'prefers-reduced-motion' media feature",
     )(fn)
     return fn
+
+
+def _load_javascript(javascript, javascript_file):
+    """Load and combine JavaScript from inline string and file"""
+    js_code = ""
+    if javascript_file:
+        with open(javascript_file, "r") as f:
+            js_code = f.read()
+    if javascript:
+        js_code += "\n" + javascript
+    return js_code if js_code else None
 
 
 @click.group(
@@ -204,6 +226,7 @@ def cli():
     default=0,
 )
 @click.option("-j", "--javascript", help="Execute this JS prior to taking the shot")
+@javascript_file_option
 @scale_factor_options
 @click.option(
     "--omit-background",
@@ -257,6 +280,7 @@ def shot(
     js_selectors_all,
     padding,
     javascript,
+    javascript_file,
     retina,
     scale_factor,
     omit_background,
@@ -310,6 +334,9 @@ def shot(
         output = filename_for_url(url, ext=ext, file_exists=os.path.exists)
 
     scale_factor = normalize_scale_factor(retina, scale_factor)
+
+    # Combine JavaScript from file and inline
+    javascript = _load_javascript(javascript, javascript_file)
 
     shot = {
         "url": url,
@@ -656,6 +683,7 @@ def multi(
     default="-",
 )
 @click.option("-j", "--javascript", help="Execute this JS prior to taking the snapshot")
+@javascript_file_option
 @click.option(
     "--timeout",
     type=int,
@@ -670,6 +698,7 @@ def accessibility(
     auth,
     output,
     javascript,
+    javascript_file,
     timeout,
     log_console,
     skip,
@@ -700,6 +729,9 @@ def accessibility(
             page.on("console", console_log)
         response = page.goto(url)
         skip_or_fail(response, skip, fail)
+
+        # Combine JavaScript from file and inline
+        javascript = _load_javascript(javascript, javascript_file)
         if javascript:
             _evaluate_js(page, javascript)
         snapshot = page.accessibility.snapshot()
@@ -728,6 +760,7 @@ def accessibility(
 )
 @click.option("--wait-for", help="Wait until this JS expression returns true")
 @click.option("-j", "--javascript", help="Execute this JavaScript on the page")
+@javascript_file_option
 @click.option(
     "--timeout",
     type=int,
@@ -746,6 +779,7 @@ def har(
     wait_for,
     timeout,
     javascript,
+    javascript_file,
     log_console,
     skip,
     fail,
@@ -789,6 +823,9 @@ def har(
         skip_or_fail(response, skip, fail)
         if wait:
             time.sleep(wait / 1000)
+
+        # Combine JavaScript from file and inline
+        javascript = _load_javascript(javascript, javascript_file)
 
         if javascript:
             _evaluate_js(page, javascript)
@@ -938,6 +975,7 @@ def javascript(
     type=click.Path(file_okay=True, writable=True, dir_okay=False, allow_dash=True),
 )
 @click.option("-j", "--javascript", help="Execute this JS prior to creating the PDF")
+@javascript_file_option
 @click.option(
     "--wait", type=int, help="Wait this many milliseconds before taking the screenshot"
 )
@@ -990,6 +1028,7 @@ def pdf(
     auth,
     output,
     javascript,
+    javascript_file,
     wait,
     wait_for,
     timeout,
@@ -1042,6 +1081,9 @@ def pdf(
         skip_or_fail(response, skip, fail)
         if wait:
             time.sleep(wait / 1000)
+
+        # Combine JavaScript from file and inline
+        javascript = _load_javascript(javascript, javascript_file)
         if javascript:
             _evaluate_js(page, javascript)
         if wait_for:
@@ -1086,6 +1128,7 @@ def pdf(
     default="-",
 )
 @click.option("-j", "--javascript", help="Execute this JS prior to saving the HTML")
+@javascript_file_option
 @click.option(
     "-s",
     "--selector",
@@ -1107,6 +1150,7 @@ def html(
     auth,
     output,
     javascript,
+    javascript_file,
     selector,
     wait,
     log_console,
@@ -1152,6 +1196,9 @@ def html(
         skip_or_fail(response, skip, fail)
         if wait:
             time.sleep(wait / 1000)
+
+        # Combine JavaScript from file and inline
+        javascript = _load_javascript(javascript, javascript_file)
         if javascript:
             _evaluate_js(page, javascript)
 
