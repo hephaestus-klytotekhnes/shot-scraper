@@ -6,6 +6,8 @@ import time
 import json
 import os
 import pathlib
+import base64
+import re
 from runpy import run_module
 from click_default_group import DefaultGroup
 import yaml
@@ -1045,6 +1047,15 @@ def javascript(
     help="Scale of the webpage rendering",
 )
 @click.option("--print-background", is_flag=True, help="Print background graphics")
+@click.option("--margin-top", type=float, help="Top margin in inches")
+@click.option("--margin-right", type=float, help="Right margin in inches")
+@click.option("--margin-bottom", type=float, help="Bottom margin in inches")
+@click.option("--margin-left", type=float, help="Left margin in inches")
+@click.option(
+    "--markdown",
+    type=click.Path(file_okay=True, writable=True, dir_okay=False),
+    help="Also save page content as Markdown to this file",
+)
 @log_console_option
 @skip_fail_options
 @bypass_csp_option
@@ -1067,6 +1078,11 @@ def pdf(
     height,
     scale,
     print_background,
+    margin_top,
+    margin_right,
+    margin_bottom,
+    margin_left,
+    markdown,
     log_console,
     skip,
     fail,
@@ -1119,6 +1135,17 @@ def pdf(
         if wait_for:
             page.wait_for_function(wait_for)
 
+        # Build margin dictionary if any margins are specified
+        margin = {}
+        if margin_top is not None:
+            margin["top"] = f"{margin_top}in"
+        if margin_right is not None:
+            margin["right"] = f"{margin_right}in"
+        if margin_bottom is not None:
+            margin["bottom"] = f"{margin_bottom}in"
+        if margin_left is not None:
+            margin["left"] = f"{margin_left}in"
+
         kwargs = {
             "landscape": landscape,
             "format": format_,
@@ -1127,18 +1154,30 @@ def pdf(
             "scale": scale,
             "print_background": print_background,
         }
+        
+        # Add margin if any were specified
+        if margin:
+            kwargs["margin"] = margin
+            
         if output != "-":
             kwargs["path"] = output
 
         if media_screen:
             page.emulate_media(media="screen")
 
-        pdf = page.pdf(**kwargs)
+        # Generate PDF
+        pdf_data = page.pdf(**kwargs)
+
+        # Generate markdown if requested
+        if markdown:
+            _save_page_as_markdown(page, markdown)
 
         if output == "-":
-            sys.stdout.buffer.write(pdf)
+            sys.stdout.buffer.write(pdf_data)
         elif not silent:
             click.echo(f"PDF of '{url}' written to '{output}'", err=True)
+            if markdown:
+                click.echo(f"Markdown of '{url}' written to '{markdown}'", err=True)
 
         browser_obj.close()
 
@@ -1610,3 +1649,65 @@ def _evaluate_js(page, javascript):
         return page.evaluate(javascript)
     except Error as error:
         raise click.ClickException(error.message)
+
+
+def _save_page_as_markdown(page, markdown_path):
+    """
+    Extract HTML content from page and convert to markdown.
+    Save images to a directory next to the markdown file.
+    """
+    try:
+        from html_to_markdown import convert_to_markdown
+    except ImportError:
+        raise click.ClickException(
+            "html-to-markdown library not installed. "
+            "Install it with: pip install html-to-markdown"
+        )
+    
+    # Get the HTML content
+    html_content = page.content()
+    
+    # Create images directory
+    markdown_path_obj = pathlib.Path(markdown_path)
+    images_dir = markdown_path_obj.parent / f"{markdown_path_obj.stem}.images_dir"
+    images_dir.mkdir(exist_ok=True)
+    
+    # Find all images in the HTML
+    img_pattern = re.compile(r'<img[^>]+src=["\']([^"\']+)["\'][^>]*>', re.IGNORECASE)
+    images = img_pattern.findall(html_content)
+    
+    # Download and save images, update HTML
+    for idx, img_src in enumerate(images):
+        try:
+            # Skip data URLs for now, handle remote images
+            if img_src.startswith('data:'):
+                # Handle data URLs
+                match = re.match(r'data:image/([^;]+);base64,(.+)', img_src)
+                if match:
+                    ext = match.group(1)
+                    if '/' in ext:
+                        ext = ext.split('/')[-1]
+                    img_data = base64.b64decode(match.group(2))
+                    img_filename = f"image_{idx}.{ext}"
+                    img_path = images_dir / img_filename
+                    with open(img_path, 'wb') as f:
+                        f.write(img_data)
+                    # Update HTML to reference local image
+                    html_content = html_content.replace(
+                        img_src,
+                        f"{images_dir.name}/{img_filename}"
+                    )
+            else:
+                # For absolute or relative URLs, we'll keep them as-is
+                # since Playwright already loaded the page
+                pass
+        except Exception as e:
+            # If we can't process an image, just skip it
+            click.echo(f"Warning: Could not process image {img_src}: {e}", err=True)
+    
+    # Convert HTML to Markdown
+    markdown_content = convert_to_markdown(html_content)
+    
+    # Write markdown file
+    with open(markdown_path, 'w', encoding='utf-8') as f:
+        f.write(markdown_content)
