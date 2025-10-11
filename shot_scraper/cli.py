@@ -8,6 +8,7 @@ import os
 import pathlib
 import base64
 import re
+import unicodedata
 from runpy import run_module
 from click_default_group import DefaultGroup
 import yaml
@@ -903,6 +904,7 @@ def har(
 @bypass_csp_option
 @http_auth_options
 @remote_cdp_option
+@javascript_file_option
 def javascript(
     url,
     javascript,
@@ -921,6 +923,7 @@ def javascript(
     auth_username,
     auth_password,
     remote_cdp,
+    javascript_file
 ):
     """
     Execute JavaScript against the page and return the result as JSON
@@ -947,6 +950,7 @@ def javascript(
 
     If a JavaScript error occurs an exit code of 1 will be returned.
     """
+    javascript = _load_javascript(javascript, javascript_file)
     if not javascript:
         if input.startswith("gh:"):
             try:
@@ -1051,10 +1055,10 @@ def javascript(
 @click.option("--margin-right", type=float, help="Right margin in inches")
 @click.option("--margin-bottom", type=float, help="Bottom margin in inches")
 @click.option("--margin-left", type=float, help="Left margin in inches")
-@click.option(
-    "--markdown",
-    type=click.Path(file_okay=True, writable=True, dir_okay=False),
-    help="Also save page content as Markdown to this file",
+@click.option(  # this is just a quick hack to add my special mode
+    "--save-everything-to",
+    type=click.Path(file_okay=False, dir_okay=True, allow_dash=False), # no other checks
+    help="Save png, html, json, everything."
 )
 @log_console_option
 @skip_fail_options
@@ -1082,7 +1086,7 @@ def pdf(
     margin_right,
     margin_bottom,
     margin_left,
-    markdown,
+    save_everything_to,
     log_console,
     skip,
     fail,
@@ -1108,8 +1112,13 @@ def pdf(
         shot-scraper pdf invoice.html -o invoice.pdf
     """
     url = url_or_file_path(url, _check_and_absolutize)
-    if output is None:
-        output = filename_for_url(url, ext="pdf", file_exists=os.path.exists)
+
+    if save_everything_to is not None:
+        assert output is None
+    else:
+        if output is None:
+            output = filename_for_url(url, ext="pdf", file_exists=os.path.exists)
+
     with sync_playwright() as p:
         context, browser_obj = _browser_context(
             p,
@@ -1131,55 +1140,117 @@ def pdf(
         # Combine JavaScript from file and inline
         javascript = _load_javascript(javascript, javascript_file)
         if javascript:
-            _evaluate_js(page, javascript)
+            js_returned = _evaluate_js(page, javascript)
+            #NOTE, GOTTA PASS JS THAT RETURNS SOMETHNG
         if wait_for:
             page.wait_for_function(wait_for)
 
-        # Build margin dictionary if any margins are specified
-        margin = {}
-        if margin_top is not None:
-            margin["top"] = f"{margin_top}in"
-        if margin_right is not None:
-            margin["right"] = f"{margin_right}in"
-        if margin_bottom is not None:
-            margin["bottom"] = f"{margin_bottom}in"
-        if margin_left is not None:
-            margin["left"] = f"{margin_left}in"
+        if save_everything_to is not None:
+            destination_dir = pathlib.Path(save_everything_to)
+            destination_dir.mkdir(parents=True, exist_ok=True)
+            # may raise PermissionError or FileExistsError, but it looks like
+            # click won't hide them, so I should get an informative stacktrace
 
-        kwargs = {
-            "landscape": landscape,
-            "format": format_,
-            "width": width,
-            "height": height,
-            "scale": scale,
-            "print_background": print_background,
-        }
-        
-        # Add margin if any were specified
-        if margin:
-            kwargs["margin"] = margin
-            
-        if output != "-":
-            kwargs["path"] = output
+            page_title = _maybe_get_page_title(js_returned) #or None
+            fname_prefix = _page_title_or_url_to_filename_pfx(page_title, url)
+            fname_prefix = destination_dir / fname_prefix
 
-        if media_screen:
-            page.emulate_media(media="screen")
+            capture_pdf(page, fname_prefix.with_suffix(".pdf"))
+            _capture_markdown(page, fname_prefix.with_suffix(".md"))
+            _save_json(js_returned, fname_prefix.with_suffix(".json"))
+            html = page.content()
+            # _save_html()
+            # _save
 
-        # Generate PDF
-        pdf_data = page.pdf(**kwargs)
+            click.echo("Wrote everything to '{destination_dir}'.")
+        else: #regular mode, not the special 'save-everything' mode
+            #pdf_data = _capture_pdf(page, pdf_args....output)
 
-        # Generate markdown if requested
-        if markdown:
-            _save_page_as_markdown(page, markdown)
+            if output == "-":
+                sys.stdout.buffer.write(pdf_data)
+            elif not silent:
+                click.echo(f"PDF of '{url}' written to '{output}'", err=True)
 
-        if output == "-":
-            sys.stdout.buffer.write(pdf_data)
-        elif not silent:
-            click.echo(f"PDF of '{url}' written to '{output}'", err=True)
-            if markdown:
-                click.echo(f"Markdown of '{url}' written to '{markdown}'", err=True)
 
         browser_obj.close()
+
+def _capture_text(something, filename):
+    """String or something JSON-like to file"""
+    if isinstance(something, str):
+        text = something
+    elif isinstance(something, (dict, list, tuple, int, float, bool)) or something is None:
+        text = json.dumps(something, ensure_ascii=False, indent=2)
+    else:
+        text = str(something)
+
+    with open(filename, 'w') as f:
+        f.write(text)
+
+def _maybe_get_page_title(json):
+    if isinstance(json, dict):
+        title = json.get("title")
+        if isinstance(title, str):
+            return title
+    return None
+
+def _page_title_or_url_to_filename_pfx(page_title, url):
+    """Convert an arbitrary page title to a safe POSIX filename."""
+    if not page_title:
+        return filename_for_url(url)
+
+    # Normalize Unicode (so accents etc. become consistent ASCII if possible)
+    normalized = unicodedata.normalize("NFKD", page_title)
+    ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
+
+    # Replace any non-alphanumeric char with underscore
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", ascii_only)
+
+    # Collapse multiple underscores
+    safe = re.sub(r"_+", "_", safe)
+
+    # Strip leading/trailing underscores, dots, or dashes (avoid hidden files)
+    safe = safe.strip("._-")
+
+    # Default fallback if title was entirely invalid
+    if not safe:
+        safe = filename_for_url(url)
+
+    # Cap length: 255 - 16 = 239
+    return safe[:239]
+
+def _capture_pdf(page, output_path, **kwargs):
+    # Build margin dictionary if any margins are specified
+    margin = {}
+    if margin_top is not None:
+        margin["top"] = f"{margin_top}in"
+    if margin_right is not None:
+        margin["right"] = f"{margin_right}in"
+    if margin_bottom is not None:
+        margin["bottom"] = f"{margin_bottom}in"
+    if margin_left is not None:
+        margin["left"] = f"{margin_left}in"
+
+    kwargs = {
+        "landscape": landscape,
+        "format": format_,
+        "width": width,
+        "height": height,
+        "scale": scale,
+        "print_background": print_background,
+    }
+
+    # Add margin if any were specified
+    if margin:
+        kwargs["margin"] = margin
+
+    if output != "-":
+        kwargs["path"] = output
+
+    if media_screen:
+        page.emulate_media(media="screen")
+
+    # Generate PDF
+    pdf_data = page.pdf(**kwargs)
 
 
 @cli.command()
@@ -1651,7 +1722,7 @@ def _evaluate_js(page, javascript):
         raise click.ClickException(error.message)
 
 
-def _save_page_as_markdown(page, markdown_path):
+def _capture_markdown(page, markdown_path):
     """
     Extract HTML content from page and convert to markdown.
     Save images to a directory next to the markdown file.
