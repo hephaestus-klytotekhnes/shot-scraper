@@ -1137,7 +1137,12 @@ def pdf(
         if wait:
             time.sleep(wait / 1000)
 
+        #tossing this in b/c may help debug
+        _capture_text(page.content(), "before_javascript.html")
+        page.screenshot(full_page=True, path="before_javascript.png")
+
         # Combine JavaScript from file and inline
+        js_returned = None
         javascript = _load_javascript(javascript, javascript_file)
         if javascript:
             js_returned = _evaluate_js(page, javascript)
@@ -1155,19 +1160,48 @@ def pdf(
             fname_prefix = _page_title_or_url_to_filename_pfx(page_title, url)
             fname_prefix = destination_dir / fname_prefix
 
-            capture_pdf(page, fname_prefix.with_suffix(".pdf"))
-            _capture_markdown(page, fname_prefix.with_suffix(".md"))
-            _save_json(js_returned, fname_prefix.with_suffix(".json"))
-            html = page.content()
-            # _save_html()
-            # _save
+            _capture_pdf(
+                page,
+                output_path=str(fname_prefix.with_suffix(".pdf")),
+                media_screen=media_screen,
+                landscape=landscape,
+                format_=format_,
+                width=width,
+                height=height,
+                scale=scale,
+                print_background=print_background,
+                margin_top=margin_top,
+                margin_right=margin_right,
+                margin_bottom=margin_bottom,
+                margin_left=margin_left,
+            )
 
-            click.echo("Wrote everything to '{destination_dir}'.")
+            #_capture_pdf(page, fname_prefix.with_suffix(".pdf"))
+            _capture_markdown(page, fname_prefix.with_suffix(".md"))
+            _capture_text(js_returned, fname_prefix.with_suffix(".json"))
+            _capture_text(page.content(), fname_prefix.with_suffix(".html"))
+            page.screenshot(full_page=True, path=str(fname_prefix.with_suffix(".png")))
+
+            click.echo(f"Wrote everything to '{destination_dir}'.")
         else: #regular mode, not the special 'save-everything' mode
-            #pdf_data = _capture_pdf(page, pdf_args....output)
+            pdf_bytes = _capture_pdf(
+                page,
+                output_path=output if output and output != "-" else None,
+                media_screen=media_screen,
+                landscape=landscape,
+                format_=format_,
+                width=width,
+                height=height,
+                scale=scale,
+                print_background=print_background,
+                margin_top=margin_top,
+                margin_right=margin_right,
+                margin_bottom=margin_bottom,
+                margin_left=margin_left,
+            )
 
             if output == "-":
-                sys.stdout.buffer.write(pdf_data)
+                sys.stdout.buffer.write(pdf_bytes)
             elif not silent:
                 click.echo(f"PDF of '{url}' written to '{output}'", err=True)
 
