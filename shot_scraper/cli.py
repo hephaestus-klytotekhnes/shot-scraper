@@ -1150,6 +1150,9 @@ def pdf(
         if wait_for:
             page.wait_for_function(wait_for)
 
+        page.wait_for_load_state("networkidle")
+        page.wait_for_function("document.fonts && document.fonts.status === 'loaded'")
+
         if save_everything_to is not None:
             destination_dir = pathlib.Path(save_everything_to)
             destination_dir.mkdir(parents=True, exist_ok=True)
@@ -1177,10 +1180,10 @@ def pdf(
             )
 
             #_capture_pdf(page, fname_prefix.with_suffix(".pdf"))
-            _capture_markdown(page, fname_prefix.with_suffix(".md"))
             _capture_text(js_returned, fname_prefix.with_suffix(".json"))
             _capture_text(page.content(), fname_prefix.with_suffix(".html"))
             page.screenshot(full_page=True, path=str(fname_prefix.with_suffix(".png")))
+            _capture_markdown(page, fname_prefix.with_suffix(".md")) #done destructively?
 
             click.echo(f"Wrote everything to '{destination_dir}'.")
         else: #regular mode, not the special 'save-everything' mode
@@ -1252,8 +1255,27 @@ def _page_title_or_url_to_filename_pfx(page_title, url):
     # Cap length: 255 - 16 = 239
     return safe[:239]
 
-def _capture_pdf(page, output_path, **kwargs):
-    # Build margin dictionary if any margins are specified
+def _capture_pdf(
+    page,
+    output_path: str | None,
+    *,
+    media_screen: bool = False,
+    landscape: bool = False,
+    format_: str | None = None,
+    width: str | None = None,
+    height: str | None = None,
+    scale: float | None = None,
+    print_background: bool = False,
+    margin_top: float | None = None,
+    margin_right: float | None = None,
+    margin_bottom: float | None = None,
+    margin_left: float | None = None,
+) -> bytes:
+    """
+    Generate a PDF and optionally write it to output_path.
+    Returns the PDF bytes either way.
+    """
+    # margins in inches → CSS strings for Playwright
     margin = {}
     if margin_top is not None:
         margin["top"] = f"{margin_top}in"
@@ -1266,25 +1288,27 @@ def _capture_pdf(page, output_path, **kwargs):
 
     kwargs = {
         "landscape": landscape,
-        "format": format_,
-        "width": width,
-        "height": height,
-        "scale": scale,
         "print_background": print_background,
     }
-
-    # Add margin if any were specified
+    if format_:
+        kwargs["format"] = format_
+    if width:
+        kwargs["width"] = width
+    if height:
+        kwargs["height"] = height
+    if scale is not None:
+        kwargs["scale"] = scale
     if margin:
         kwargs["margin"] = margin
-
-    if output != "-":
-        kwargs["path"] = output
+    if output_path:
+        kwargs["path"] = str(output_path)
 
     if media_screen:
         page.emulate_media(media="screen")
 
-    # Generate PDF
-    pdf_data = page.pdf(**kwargs)
+    pdf_bytes = page.pdf(**kwargs)  # returns bytes even if path is provided
+    return pdf_bytes
+
 
 
 @cli.command()
