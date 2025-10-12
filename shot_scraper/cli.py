@@ -6,6 +6,9 @@ import time
 import json
 import os
 import pathlib
+import base64
+import re
+import unicodedata
 from runpy import run_module
 from click_default_group import DefaultGroup
 import yaml
@@ -901,6 +904,7 @@ def har(
 @bypass_csp_option
 @http_auth_options
 @remote_cdp_option
+@javascript_file_option
 def javascript(
     url,
     javascript,
@@ -919,6 +923,7 @@ def javascript(
     auth_username,
     auth_password,
     remote_cdp,
+    javascript_file
 ):
     """
     Execute JavaScript against the page and return the result as JSON
@@ -945,6 +950,7 @@ def javascript(
 
     If a JavaScript error occurs an exit code of 1 will be returned.
     """
+    javascript = _load_javascript(javascript, javascript_file)
     if not javascript:
         if input.startswith("gh:"):
             try:
@@ -1045,6 +1051,15 @@ def javascript(
     help="Scale of the webpage rendering",
 )
 @click.option("--print-background", is_flag=True, help="Print background graphics")
+@click.option("--margin-top", type=float, help="Top margin in inches")
+@click.option("--margin-right", type=float, help="Right margin in inches")
+@click.option("--margin-bottom", type=float, help="Bottom margin in inches")
+@click.option("--margin-left", type=float, help="Left margin in inches")
+@click.option(  # this is just a quick hack to add my special mode
+    "--save-everything-to",
+    type=click.Path(file_okay=False, dir_okay=True, allow_dash=False), # no other checks
+    help="Save png, html, json, everything."
+)
 @log_console_option
 @skip_fail_options
 @bypass_csp_option
@@ -1067,6 +1082,11 @@ def pdf(
     height,
     scale,
     print_background,
+    margin_top,
+    margin_right,
+    margin_bottom,
+    margin_left,
+    save_everything_to,
     log_console,
     skip,
     fail,
@@ -1092,8 +1112,13 @@ def pdf(
         shot-scraper pdf invoice.html -o invoice.pdf
     """
     url = url_or_file_path(url, _check_and_absolutize)
-    if output is None:
-        output = filename_for_url(url, ext="pdf", file_exists=os.path.exists)
+
+    if save_everything_to is not None:
+        assert output is None
+    else:
+        if output is None:
+            output = filename_for_url(url, ext="pdf", file_exists=os.path.exists)
+
     with sync_playwright() as p:
         context, browser_obj = _browser_context(
             p,
@@ -1112,35 +1137,180 @@ def pdf(
         if wait:
             time.sleep(wait / 1000)
 
+        #tossing this in b/c may help debug
+        _capture_text(page.content(), "before_javascript.html")
+        page.screenshot(full_page=True, path="before_javascript.png")
+
         # Combine JavaScript from file and inline
+        js_returned = None
         javascript = _load_javascript(javascript, javascript_file)
         if javascript:
-            _evaluate_js(page, javascript)
+            js_returned = _evaluate_js(page, javascript)
+            #NOTE, GOTTA PASS JS THAT RETURNS SOMETHNG
         if wait_for:
             page.wait_for_function(wait_for)
 
-        kwargs = {
-            "landscape": landscape,
-            "format": format_,
-            "width": width,
-            "height": height,
-            "scale": scale,
-            "print_background": print_background,
-        }
-        if output != "-":
-            kwargs["path"] = output
+        time.sleep(5)
 
-        if media_screen:
-            page.emulate_media(media="screen")
+        page.wait_for_load_state("networkidle")
+        page.wait_for_function("document.fonts && document.fonts.status === 'loaded'")
 
-        pdf = page.pdf(**kwargs)
+        if save_everything_to is not None:
+            destination_dir = pathlib.Path(save_everything_to)
+            destination_dir.mkdir(parents=True, exist_ok=True)
+            # may raise PermissionError or FileExistsError, but it looks like
+            # click won't hide them, so I should get an informative stacktrace
 
-        if output == "-":
-            sys.stdout.buffer.write(pdf)
-        elif not silent:
-            click.echo(f"PDF of '{url}' written to '{output}'", err=True)
+            page_title = _maybe_get_page_title(js_returned) #or None
+            fname_prefix = _page_title_or_url_to_filename_pfx(page_title, url)
+            fname_prefix = destination_dir / fname_prefix
+
+            _capture_pdf(
+                page,
+                output_path=str(fname_prefix.with_suffix(".pdf")),
+                media_screen=media_screen,
+                landscape=landscape,
+                format_=format_,
+                width=width,
+                height=height,
+                scale=scale,
+                print_background=print_background,
+                margin_top=margin_top,
+                margin_right=margin_right,
+                margin_bottom=margin_bottom,
+                margin_left=margin_left,
+            )
+
+            #_capture_pdf(page, fname_prefix.with_suffix(".pdf"))
+            _capture_text(js_returned, fname_prefix.with_suffix(".json"))
+            _capture_text(page.content(), fname_prefix.with_suffix(".html"))
+            page.screenshot(full_page=True, path=str(fname_prefix.with_suffix(".png")))
+            _capture_markdown(page, fname_prefix.with_suffix(".md")) #done destructively?
+
+            click.echo(f"Wrote everything to '{destination_dir}'.")
+        else: #regular mode, not the special 'save-everything' mode
+            pdf_bytes = _capture_pdf(
+                page,
+                output_path=output if output and output != "-" else None,
+                media_screen=media_screen,
+                landscape=landscape,
+                format_=format_,
+                width=width,
+                height=height,
+                scale=scale,
+                print_background=print_background,
+                margin_top=margin_top,
+                margin_right=margin_right,
+                margin_bottom=margin_bottom,
+                margin_left=margin_left,
+            )
+
+            if output == "-":
+                sys.stdout.buffer.write(pdf_bytes)
+            elif not silent:
+                click.echo(f"PDF of '{url}' written to '{output}'", err=True)
+
 
         browser_obj.close()
+
+def _capture_text(something, filename):
+    """String or something JSON-like to file"""
+    if isinstance(something, str):
+        text = something
+    elif isinstance(something, (dict, list, tuple, int, float, bool)) or something is None:
+        text = json.dumps(something, ensure_ascii=False, indent=2)
+    else:
+        text = str(something)
+
+    with open(filename, 'w') as f:
+        f.write(text)
+
+def _maybe_get_page_title(json):
+    if isinstance(json, dict):
+        title = json.get("title")
+        if isinstance(title, str):
+            return title
+    return None
+
+def _page_title_or_url_to_filename_pfx(page_title, url):
+    """Convert an arbitrary page title to a safe POSIX filename."""
+    if not page_title:
+        return filename_for_url(url)
+
+    # Normalize Unicode (so accents etc. become consistent ASCII if possible)
+    normalized = unicodedata.normalize("NFKD", page_title)
+    ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
+
+    # Replace any non-alphanumeric char with underscore
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", ascii_only)
+
+    # Collapse multiple underscores
+    safe = re.sub(r"_+", "_", safe)
+
+    # Strip leading/trailing underscores, dots, or dashes (avoid hidden files)
+    safe = safe.strip("._-")
+
+    # Default fallback if title was entirely invalid
+    if not safe:
+        safe = filename_for_url(url)
+
+    # Cap length: 255 - 16 = 239
+    return safe[:239]
+
+def _capture_pdf(
+    page,
+    output_path: str | None,
+    *,
+    media_screen: bool = False,
+    landscape: bool = False,
+    format_: str | None = None,
+    width: str | None = None,
+    height: str | None = None,
+    scale: float | None = None,
+    print_background: bool = False,
+    margin_top: float | None = None,
+    margin_right: float | None = None,
+    margin_bottom: float | None = None,
+    margin_left: float | None = None,
+) -> bytes:
+    """
+    Generate a PDF and optionally write it to output_path.
+    Returns the PDF bytes either way.
+    """
+    # margins in inches → CSS strings for Playwright
+    margin = {}
+    if margin_top is not None:
+        margin["top"] = f"{margin_top}in"
+    if margin_right is not None:
+        margin["right"] = f"{margin_right}in"
+    if margin_bottom is not None:
+        margin["bottom"] = f"{margin_bottom}in"
+    if margin_left is not None:
+        margin["left"] = f"{margin_left}in"
+
+    kwargs = {
+        "landscape": landscape,
+        "print_background": print_background,
+    }
+    if format_:
+        kwargs["format"] = format_
+    if width:
+        kwargs["width"] = width
+    if height:
+        kwargs["height"] = height
+    if scale is not None:
+        kwargs["scale"] = scale
+    if margin:
+        kwargs["margin"] = margin
+    if output_path:
+        kwargs["path"] = str(output_path)
+
+    if media_screen:
+        page.emulate_media(media="screen")
+
+    pdf_bytes = page.pdf(**kwargs)  # returns bytes even if path is provided
+    return pdf_bytes
+
 
 
 @cli.command()
@@ -1610,3 +1780,65 @@ def _evaluate_js(page, javascript):
         return page.evaluate(javascript)
     except Error as error:
         raise click.ClickException(error.message)
+
+
+def _capture_markdown(page, markdown_path):
+    """
+    Extract HTML content from page and convert to markdown.
+    Save images to a directory next to the markdown file.
+    """
+    try:
+        from html_to_markdown import convert_to_markdown
+    except ImportError:
+        raise click.ClickException(
+            "html-to-markdown library not installed. "
+            "Install it with: pip install html-to-markdown"
+        )
+    
+    # Get the HTML content
+    html_content = page.content()
+    
+    # Create images directory
+    markdown_path_obj = pathlib.Path(markdown_path)
+    images_dir = markdown_path_obj.parent / f"{markdown_path_obj.stem}.images_dir"
+    images_dir.mkdir(exist_ok=True)
+    
+    # Find all images in the HTML
+    img_pattern = re.compile(r'<img[^>]+src=["\']([^"\']+)["\'][^>]*>', re.IGNORECASE)
+    images = img_pattern.findall(html_content)
+    
+    # Download and save images, update HTML
+    for idx, img_src in enumerate(images):
+        try:
+            # Skip data URLs for now, handle remote images
+            if img_src.startswith('data:'):
+                # Handle data URLs
+                match = re.match(r'data:image/([^;]+);base64,(.+)', img_src)
+                if match:
+                    ext = match.group(1)
+                    if '/' in ext:
+                        ext = ext.split('/')[-1]
+                    img_data = base64.b64decode(match.group(2))
+                    img_filename = f"image_{idx}.{ext}"
+                    img_path = images_dir / img_filename
+                    with open(img_path, 'wb') as f:
+                        f.write(img_data)
+                    # Update HTML to reference local image
+                    html_content = html_content.replace(
+                        img_src,
+                        f"{images_dir.name}/{img_filename}"
+                    )
+            else:
+                # For absolute or relative URLs, we'll keep them as-is
+                # since Playwright already loaded the page
+                pass
+        except Exception as e:
+            # If we can't process an image, just skip it
+            click.echo(f"Warning: Could not process image {img_src}: {e}", err=True)
+    
+    # Convert HTML to Markdown
+    markdown_content = convert_to_markdown(html_content)
+    
+    # Write markdown file
+    with open(markdown_path, 'w', encoding='utf-8') as f:
+        f.write(markdown_content)
