@@ -1150,6 +1150,8 @@ def pdf(
         if wait_for:
             page.wait_for_function(wait_for)
 
+        time.sleep(5)
+
         page.wait_for_load_state("networkidle")
         page.wait_for_function("document.fonts && document.fonts.status === 'loaded'")
 
