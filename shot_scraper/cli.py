@@ -18,7 +18,7 @@ from playwright.sync_api import sync_playwright, Error, TimeoutError
 
 from shot_scraper.utils import filename_for_url, load_github_script, url_or_file_path
 
-BROWSERS = ("chromium", "firefox", "webkit", "chrome", "chrome-beta")
+BROWSERS = ("chromium", "firefox", "webkit", "chrome", "chrome-beta", "system-chromium")
 
 
 def console_log(msg):
@@ -450,7 +450,10 @@ def _browser_context(
         # When using remote CDP, we must use Chromium and connect instead of launch
         click.echo("Using remote browser, IGNORING BROWSER ARGS", err=True)
         browser_obj = p.chromium.connect_over_cdp(remote_cdp)
+    elif browser == "system-chromium":
+        browser_obj = p.chromium.launch(executable_path="/usr/bin/chromium", **browser_kwargs)
     elif browser == "chromium":
+        print("Warning to you in particular, I have problems with this PW installed Chromium!")
         browser_obj = p.chromium.launch(**browser_kwargs)
     elif browser == "firefox":
         browser_obj = p.firefox.launch(**browser_kwargs)
@@ -1066,6 +1069,7 @@ def javascript(
 @silent_option
 @http_auth_options
 @remote_cdp_option
+@browser_option
 def pdf(
     url,
     auth,
@@ -1095,6 +1099,7 @@ def pdf(
     auth_username,
     auth_password,
     remote_cdp,
+    browser,
 ):
     """
     Create a PDF of the specified page
@@ -1127,6 +1132,7 @@ def pdf(
         context, browser_obj = _browser_context(
             p,
             auth,
+            browser=browser,
             bypass_csp=bypass_csp,
             auth_username=auth_username,
             auth_password=auth_password,
