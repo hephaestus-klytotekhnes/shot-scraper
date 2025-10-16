@@ -1115,6 +1115,10 @@ def pdf(
 
     if save_everything_to is not None:
         assert output is None
+        destination_dir = pathlib.Path(save_everything_to)
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        # may raise PermissionError or FileExistsError, but it looks like
+        # Click won't hide them, so I should get an informative stacktrace
     else:
         if output is None:
             output = filename_for_url(url, ext="pdf", file_exists=os.path.exists)
@@ -1137,9 +1141,34 @@ def pdf(
         if wait:
             time.sleep(wait / 1000)
 
-        #tossing this in b/c may help debug
-        _capture_text(page.content(), "before_javascript.html")
-        page.screenshot(full_page=True, path="before_javascript.png")
+
+        if save_everything_to is not None:
+            #Include extended output for debugging
+            extra_output_fname_prfx = "before_javascript"
+            extra_output_fname_prfx = destination_dir / extra_output_fname_prfx
+            _capture_text(
+                page.content(),
+                extra_output_fname_prfx.with_suffix(".html")
+            )
+            page.screenshot(
+                full_page=True,
+                path=str(extra_output_fname_prfx.with_suffix(".png"))
+            )
+            _capture_pdf(
+                page,
+                output_path=str(extra_output_fname_prfx.with_suffix(".pdf")),
+                media_screen=media_screen,
+                landscape=landscape,
+                format_=format_,
+                width=width,
+                height=height,
+                scale=scale,
+                print_background=print_background,
+                margin_top=margin_top,
+                margin_right=margin_right,
+                margin_bottom=margin_bottom,
+                margin_left=margin_left,
+            )
 
         # Combine JavaScript from file and inline
         js_returned = None
@@ -1152,18 +1181,21 @@ def pdf(
 
         time.sleep(5)
 
+        #bad
+        #page.wait_for_function("document.body && document.body.innerText && document.body.innerText.trim().length > 0")
+
         page.wait_for_load_state("networkidle")
         page.wait_for_function("document.fonts && document.fonts.status === 'loaded'")
 
         if save_everything_to is not None:
-            destination_dir = pathlib.Path(save_everything_to)
-            destination_dir.mkdir(parents=True, exist_ok=True)
-            # may raise PermissionError or FileExistsError, but it looks like
-            # click won't hide them, so I should get an informative stacktrace
 
             page_title = _maybe_get_page_title(js_returned) #or None
             fname_prefix = _page_title_or_url_to_filename_pfx(page_title, url)
             fname_prefix = destination_dir / fname_prefix
+
+            # Print a PDF from the locally saved HTML using a LOCAL browser (override remote CDP)
+            local_html_path = str(fname_prefix.with_suffix(".html"))
+            local_pdf_path = str(fname_prefix.with_suffix(".fromhtml.pdf"))
 
             _capture_pdf(
                 page,
@@ -1183,7 +1215,7 @@ def pdf(
 
             #_capture_pdf(page, fname_prefix.with_suffix(".pdf"))
             _capture_text(js_returned, fname_prefix.with_suffix(".json"))
-            _capture_text(page.content(), fname_prefix.with_suffix(".html"))
+            _capture_text(page.content(), local_html_path)
             page.screenshot(full_page=True, path=str(fname_prefix.with_suffix(".png")))
             _capture_markdown(page, fname_prefix.with_suffix(".md")) #done destructively?
 
